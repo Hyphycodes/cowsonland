@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { CountryCode } from "plaid";
 import { plaidClient } from "@/lib/plaid/client";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 
@@ -32,7 +33,7 @@ export async function POST(request: Request) {
     if (itemData.item.institution_id) {
       const { data: inst } = await plaidClient.institutionsGetById({
         institution_id: itemData.item.institution_id,
-        country_codes: ["US"] as never,
+        country_codes: [CountryCode.Us],
       });
       institutionName = inst.institution.name;
     }

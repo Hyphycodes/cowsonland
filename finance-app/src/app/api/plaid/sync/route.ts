@@ -128,18 +128,23 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  // Allow either a logged-in user OR a Plaid webhook.
-  // Webhook signature verification: TODO (Phase 3) — see plaid.com/docs/api/webhooks/webhook-verification
-  const supabase = await createClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  // Read body once; ignore content for now — we always do a full sync.
+  // Accept either a logged-in user OR a Bearer ${CRON_SECRET} (used by
+  // Vercel Cron / verified webhook proxy). Plaid webhook signature
+  // verification is TODO — until then, anonymous POSTs are rejected.
   await request.json().catch(() => null);
 
-  if (!user) {
-    // Treat as webhook — accept silently; verification is added in Phase 3.
+  const auth = request.headers.get("authorization");
+  const hasCronSecret =
+    !!process.env.CRON_SECRET && auth === `Bearer ${process.env.CRON_SECRET}`;
+
+  if (!hasCronSecret) {
+    const supabase = await createClient();
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    if (!user) {
+      return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    }
   }
 
   try {
