@@ -30,6 +30,8 @@ export type IngestSummary = {
   duplicates: number;
   errors: number;
   inserted_ids: string[];
+  /** Set by post-ingest rule pass; absent if no inserts happened. */
+  rules_matched?: number;
 };
 
 /**

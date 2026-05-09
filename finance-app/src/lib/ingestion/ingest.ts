@@ -1,6 +1,8 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { IngestSummary, NormalizedTx } from "./types";
 import { partitionDuplicates } from "./dedupe";
+import { applyRulesToTransaction } from "@/lib/rules/apply";
+import type { Transaction } from "@/types/db";
 
 /**
  * The single chokepoint for putting transactions into the DB. Every
@@ -100,10 +102,57 @@ export async function ingestTransactions(
   summary.imported = data?.length ?? 0;
   summary.inserted_ids = (data ?? []).map((r) => r.id);
 
-  // TODO(phase: rules engine): pipe summary.inserted_ids into the rules
-  // engine here so newly-imported rows can be auto-categorized and
-  // routed to the review queue. Keep this function side-effect-free
-  // beyond inserting transactions until then.
+  await runRulesOnInserted(client, summary.inserted_ids, summary);
 
   return summary;
+}
+
+/**
+ * Re-fetch the freshly inserted rows and run the rules engine on each.
+ * Failures here must not roll back the insert — categorization can be
+ * retried via /api/rules/apply later.
+ */
+async function runRulesOnInserted(
+  admin: SupabaseClient,
+  ids: string[],
+  summary: IngestSummary,
+): Promise<void> {
+  if (ids.length === 0) return;
+  const { data: rows, error } = await admin
+    .from("transactions")
+    .select(
+      "id, user_id, amount, merchant_name, raw_name, account_id, source, plaid_category, category_id, category_source, notes",
+    )
+    .in("id", ids)
+    .returns<
+      Pick<
+        Transaction,
+        | "id"
+        | "user_id"
+        | "amount"
+        | "merchant_name"
+        | "raw_name"
+        | "account_id"
+        | "source"
+        | "plaid_category"
+        | "category_id"
+        | "category_source"
+        | "notes"
+      >[]
+    >();
+  if (error || !rows) return;
+
+  let matched = 0;
+  for (const tx of rows) {
+    try {
+      const r = await applyRulesToTransaction(admin, tx);
+      if (r.matched) matched += 1;
+    } catch (err) {
+      console.error("post-ingest rule apply", err);
+      summary.errors += 1;
+    }
+  }
+  // Stash on the summary for callers that want it; not part of the
+  // type contract so opt-in only.
+  (summary as unknown as Record<string, number>).rules_matched = matched;
 }

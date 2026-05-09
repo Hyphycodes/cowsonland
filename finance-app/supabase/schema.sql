@@ -422,3 +422,128 @@ update public.transactions
       external_transaction_id = plaid_transaction_id
   where source is null
     and plaid_transaction_id is not null;
+
+-- =============================================================
+-- Categories upgrades, transaction_rules, transaction_splits
+-- Phase 2 of categorization. Idempotent.
+-- =============================================================
+
+alter table public.categories
+  add column if not exists type text not null default 'expense';
+alter table public.categories
+  drop constraint if exists categories_type_check;
+alter table public.categories
+  add constraint categories_type_check
+  check (type in ('income', 'expense', 'transfer'));
+alter table public.categories
+  add column if not exists sort_order int not null default 0;
+-- color and icon already exist
+
+-- Categorization columns on transactions.
+alter table public.transactions
+  add column if not exists category_source text not null default 'none';
+alter table public.transactions
+  drop constraint if exists transactions_category_source_check;
+alter table public.transactions
+  add constraint transactions_category_source_check
+  check (category_source in ('manual', 'rule', 'plaid_default', 'none'));
+alter table public.transactions
+  add column if not exists is_split boolean not null default false;
+
+-- Rules table (must exist before applied_rule_id FK).
+create table if not exists public.transaction_rules (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null,
+  enabled boolean not null default true,
+  priority int not null default 100,
+  merchant_contains text,
+  raw_name_contains text,
+  amount_min numeric(14, 2),
+  amount_max numeric(14, 2),
+  amount_exact numeric(14, 2),
+  account_id uuid references public.accounts(id) on delete cascade,
+  source text
+    check (source is null or source in ('plaid', 'csv', 'apple_card', 'manual', 'manual_liability')),
+  plaid_category text,
+  transaction_type text not null default 'any'
+    check (transaction_type in ('debit', 'credit', 'any')),
+  set_category_id uuid references public.categories(id) on delete set null,
+  set_notes text,
+  mark_as_transfer boolean not null default false,
+  times_applied int not null default 0,
+  last_applied_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, name)
+);
+
+create index if not exists transaction_rules_priority_idx
+  on public.transaction_rules(user_id, enabled, priority);
+
+alter table public.transaction_rules enable row level security;
+drop policy if exists "own transaction rules" on public.transaction_rules;
+create policy "own transaction rules" on public.transaction_rules
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop trigger if exists touch_transaction_rules on public.transaction_rules;
+create trigger touch_transaction_rules before update on public.transaction_rules
+  for each row execute function public.touch_updated_at();
+
+alter table public.transactions
+  add column if not exists applied_rule_id uuid
+    references public.transaction_rules(id) on delete set null;
+
+-- Splits table.
+create table if not exists public.transaction_splits (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  transaction_id uuid not null references public.transactions(id) on delete cascade,
+  category_id uuid references public.categories(id) on delete set null,
+  amount numeric(14, 2) not null,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists transaction_splits_tx_idx
+  on public.transaction_splits(transaction_id);
+
+alter table public.transaction_splits enable row level security;
+drop policy if exists "own transaction splits" on public.transaction_splits;
+create policy "own transaction splits" on public.transaction_splits
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Update spending view to exclude transfer-categorized transactions.
+-- Transfers show in history but never count toward spending/cash flow.
+drop view if exists public.spending_with_installments;
+create view public.spending_with_installments
+  with (security_invoker = on)
+  as
+  select
+    t.id              as id,
+    t.user_id         as user_id,
+    t.date            as date,
+    t.amount          as amount,
+    t.category_id     as category_id,
+    t.merchant_name   as merchant_name,
+    'transaction'::text as source_kind,
+    null::uuid        as plan_id
+  from public.transactions t
+  left join public.categories c on c.id = t.category_id
+  where t.id not in (
+    select transaction_id from public.installment_payments
+     where transaction_id is not null
+  )
+  and (c.type is null or c.type <> 'transfer')
+  union all
+  select
+    p.id              as id,
+    p.user_id         as user_id,
+    p.purchase_date   as date,
+    p.total_amount    as amount,
+    p.purchase_category_id as category_id,
+    p.merchant        as merchant_name,
+    'installment_purchase'::text as source_kind,
+    p.id              as plan_id
+  from public.installment_plans p
+  where p.deleted_at is null;

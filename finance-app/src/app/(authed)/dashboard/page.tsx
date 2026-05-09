@@ -4,6 +4,7 @@ import { computeProgress } from "@/lib/installments/schedule";
 import { fmtDate, fmtUsd } from "@/lib/installments/format";
 import type {
   Account,
+  Category,
   InstallmentPayment,
   InstallmentPlan,
   Transaction,
@@ -41,6 +42,8 @@ export default async function DashboardPage({
     { data: plans },
     { data: payments },
     { data: spendingRows },
+    { data: categories },
+    { count: reviewCount },
   ] = await Promise.all([
     supabase
       .from("accounts")
@@ -69,7 +72,18 @@ export default async function DashboardPage({
       .order("date", { ascending: false })
       .limit(20)
       .returns<SpendingRow[]>(),
+    supabase
+      .from("categories")
+      .select("*")
+      .returns<Category[]>(),
+    supabase
+      .from("transactions")
+      .select("id", { count: "exact", head: true })
+      .in("category_source", ["none", "plaid_default"]),
   ]);
+
+  const catById = new Map<string, Category>();
+  for (const c of categories ?? []) catById.set(c.id, c);
 
   // Net worth.
   // - Credit-card balances (type='credit') count as negative.
@@ -153,6 +167,9 @@ export default async function DashboardPage({
     return { plan: p, progress: prog };
   });
 
+  // Cash-flow mode shows raw transactions (transfers included so they
+  // remain visible in history) but the spending view excludes transfers
+  // for decision-mode aggregates.
   const recent =
     mode === "cash_flow"
       ? (transactions ?? []).map((t) => ({
@@ -162,6 +179,8 @@ export default async function DashboardPage({
           merchant_name: t.merchant_name ?? t.raw_name,
           source_kind: "transaction" as const,
           plaid_category: t.plaid_category,
+          category_id: t.category_id,
+          category_source: t.category_source,
         }))
       : (spendingRows ?? []).map((r) => ({
           id: r.id,
@@ -170,10 +189,26 @@ export default async function DashboardPage({
           merchant_name: r.merchant_name,
           source_kind: r.source_kind,
           plaid_category: null as string | null,
+          category_id: null as string | null,
+          category_source: "none" as const,
         }));
 
   return (
     <div className="space-y-10">
+      {/* Review queue prompt */}
+      {(reviewCount ?? 0) > 0 && (
+        <section className="rounded-md border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 p-3 text-sm flex items-center justify-between">
+          <p>
+            <strong>{reviewCount}</strong>{" "}
+            {reviewCount === 1 ? "transaction" : "transactions"} waiting in
+            the review queue.
+          </p>
+          <Link href="/review" className="text-xs underline">
+            Review →
+          </Link>
+        </section>
+      )}
+
       {/* Card-promo reminders */}
       {upcomingCardPromos.length > 0 && (
         <section className="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/40 p-3 text-sm space-y-1">
@@ -281,34 +316,63 @@ export default async function DashboardPage({
         </div>
         {recent.length > 0 ? (
           <ul className="divide-y divide-zinc-200 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-800 rounded-md">
-            {recent.map((t) => (
-              <li
-                key={t.id}
-                className="px-4 py-3 flex items-center justify-between text-sm"
-              >
-                <div className="min-w-0">
-                  <p className="font-medium truncate">
-                    {t.merchant_name ?? "Unknown"}
-                    {t.source_kind === "installment_purchase" && (
-                      <span className="ml-2 text-xs text-zinc-500">
-                        installment
-                      </span>
-                    )}
-                  </p>
-                  <p className="text-xs text-zinc-500">
-                    {t.date}
-                    {t.plaid_category ? ` · ${t.plaid_category}` : ""}
-                  </p>
-                </div>
-                <p
-                  className={`font-mono tabular-nums ${
-                    t.amount < 0 ? "text-emerald-600" : ""
-                  }`}
+            {recent.map((t) => {
+              const cat = t.category_id ? catById.get(t.category_id) : null;
+              const isTransfer = cat?.type === "transfer";
+              return (
+                <li
+                  key={t.id}
+                  className="px-4 py-3 flex items-center justify-between text-sm"
                 >
-                  {fmt(t.amount)}
-                </p>
-              </li>
-            ))}
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">
+                      {t.merchant_name ?? "Unknown"}
+                      {t.source_kind === "installment_purchase" && (
+                        <span className="ml-2 text-xs text-zinc-500">
+                          installment
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-xs text-zinc-500 flex items-center gap-2 mt-0.5">
+                      <span>{t.date}</span>
+                      {cat ? (
+                        <span
+                          className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]"
+                          style={{
+                            backgroundColor: cat.color
+                              ? `${cat.color}22`
+                              : undefined,
+                            color: cat.color ?? undefined,
+                          }}
+                        >
+                          {cat.icon}
+                          {cat.name}
+                          {isTransfer && " · transfer"}
+                        </span>
+                      ) : (
+                        <Link
+                          href="/review"
+                          className="rounded-full px-2 py-0.5 text-[10px] border border-amber-300 text-amber-700 hover:bg-amber-50 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-950/40"
+                        >
+                          uncategorized
+                        </Link>
+                      )}
+                    </p>
+                  </div>
+                  <p
+                    className={`font-mono tabular-nums ${
+                      isTransfer
+                        ? "text-zinc-400"
+                        : t.amount < 0
+                          ? "text-emerald-600"
+                          : ""
+                    }`}
+                  >
+                    {fmt(t.amount)}
+                  </p>
+                </li>
+              );
+            })}
           </ul>
         ) : (
           <p className="text-sm text-zinc-500">

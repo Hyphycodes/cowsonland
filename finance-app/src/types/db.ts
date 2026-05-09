@@ -98,8 +98,62 @@ export type Transaction = {
   dedupe_fingerprint: string | null;
   imported_at: string | null;
   raw_payload: Record<string, unknown> | null;
+  category_source: CategorySource;
+  applied_rule_id: string | null;
+  is_split: boolean;
   created_at: string;
   updated_at: string;
+};
+
+export type CategoryType = "income" | "expense" | "transfer";
+export type CategorySource = "manual" | "rule" | "plaid_default" | "none";
+
+export type Category = {
+  id: string;
+  user_id: string;
+  name: string;
+  type: CategoryType;
+  parent_id: string | null;
+  color: string | null;
+  icon: string | null;
+  sort_order: number;
+  created_at: string;
+};
+
+export type RuleTransactionType = "debit" | "credit" | "any";
+
+export type TransactionRule = {
+  id: string;
+  user_id: string;
+  name: string;
+  enabled: boolean;
+  priority: number;
+  merchant_contains: string | null;
+  raw_name_contains: string | null;
+  amount_min: number | null;
+  amount_max: number | null;
+  amount_exact: number | null;
+  account_id: string | null;
+  source: TransactionSource | null;
+  plaid_category: string | null;
+  transaction_type: RuleTransactionType;
+  set_category_id: string | null;
+  set_notes: string | null;
+  mark_as_transfer: boolean;
+  times_applied: number;
+  last_applied_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type TransactionSplit = {
+  id: string;
+  user_id: string;
+  transaction_id: string;
+  category_id: string | null;
+  amount: number;
+  notes: string | null;
+  created_at: string;
 };
 
 export type ImportBatchSource = "csv" | "apple_card" | "plaid" | "manual";

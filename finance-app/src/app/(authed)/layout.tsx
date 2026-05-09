@@ -32,6 +32,24 @@ export default function AuthedLayout({
               Imports
             </Link>
             <Link
+              href="/review"
+              className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              Review
+            </Link>
+            <Link
+              href="/rules"
+              className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              Rules
+            </Link>
+            <Link
+              href="/categories"
+              className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              Categories
+            </Link>
+            <Link
               href="/connect"
               className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
             >
