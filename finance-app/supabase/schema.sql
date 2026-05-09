@@ -334,3 +334,91 @@ create view public.spending_with_installments
     p.id              as plan_id
   from public.installment_plans p
   where p.deleted_at is null;
+
+-- =============================================================
+-- Source-agnostic transaction ingestion
+-- Adds: import_batches table, ingestion columns on transactions,
+-- account-source enum widening (csv + manual), backfill of existing
+-- Plaid rows. Idempotent — safe to re-run.
+-- =============================================================
+
+create table if not exists public.import_batches (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  source text not null
+    check (source in ('csv', 'apple_card', 'plaid', 'manual')),
+  filename text,
+  -- 'pending' (rows parsed, awaiting user mapping/confirmation)
+  -- 'completed' (rows imported)
+  -- 'failed' (parsing or insert error)
+  -- 'cancelled' (user discarded)
+  status text not null default 'pending',
+  rows_parsed int not null default 0,
+  imported_count int not null default 0,
+  duplicate_count int not null default 0,
+  error_count int not null default 0,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists import_batches_user_idx
+  on public.import_batches(user_id, created_at desc);
+
+alter table public.import_batches enable row level security;
+drop policy if exists "own import batches" on public.import_batches;
+create policy "own import batches" on public.import_batches
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Widen accounts.source to allow generic csv / manual accounts.
+alter table public.accounts
+  drop constraint if exists accounts_source_check;
+alter table public.accounts
+  add constraint accounts_source_check
+  check (source in ('plaid', 'apple_card', 'manual_liability', 'csv', 'manual'));
+
+-- Add ingestion columns on transactions.
+alter table public.transactions
+  add column if not exists source text;
+alter table public.transactions
+  add column if not exists source_account_id text;
+alter table public.transactions
+  add column if not exists external_transaction_id text;
+alter table public.transactions
+  add column if not exists import_batch_id uuid
+    references public.import_batches(id) on delete set null;
+alter table public.transactions
+  add column if not exists dedupe_fingerprint text;
+alter table public.transactions
+  add column if not exists imported_at timestamptz default now();
+alter table public.transactions
+  add column if not exists raw_payload jsonb;
+
+alter table public.transactions
+  drop constraint if exists transactions_source_check;
+alter table public.transactions
+  add constraint transactions_source_check
+  check (
+    source is null
+    or source in ('plaid', 'csv', 'apple_card', 'manual', 'manual_liability')
+  );
+
+create index if not exists transactions_fingerprint_idx
+  on public.transactions(user_id, dedupe_fingerprint);
+create index if not exists transactions_external_id_idx
+  on public.transactions(external_transaction_id);
+create index if not exists transactions_import_batch_idx
+  on public.transactions(import_batch_id);
+
+-- Per-user uniqueness on external_transaction_id catches Plaid + future
+-- source dupes at the DB level. Partial because most rows (manual) have null.
+create unique index if not exists transactions_user_external_unique
+  on public.transactions(user_id, external_transaction_id)
+  where external_transaction_id is not null;
+
+-- Backfill: existing Plaid rows predate these columns. Stamp source/external
+-- so dedupe works against them too.
+update public.transactions
+  set source = 'plaid',
+      external_transaction_id = plaid_transaction_id
+  where source is null
+    and plaid_transaction_id is not null;

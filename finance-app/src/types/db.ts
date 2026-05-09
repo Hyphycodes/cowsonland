@@ -67,6 +67,13 @@ export type InstallmentPayment = {
   created_at: string;
 };
 
+export type TransactionSource =
+  | "plaid"
+  | "csv"
+  | "apple_card"
+  | "manual"
+  | "manual_liability";
+
 export type Transaction = {
   id: string;
   user_id: string;
@@ -84,8 +91,36 @@ export type Transaction = {
   ai_category: string | null;
   pending: boolean;
   notes: string | null;
+  source: TransactionSource | null;
+  source_account_id: string | null;
+  external_transaction_id: string | null;
+  import_batch_id: string | null;
+  dedupe_fingerprint: string | null;
+  imported_at: string | null;
+  raw_payload: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
+};
+
+export type ImportBatchSource = "csv" | "apple_card" | "plaid" | "manual";
+export type ImportBatchStatus =
+  | "pending"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type ImportBatch = {
+  id: string;
+  user_id: string;
+  source: ImportBatchSource;
+  filename: string | null;
+  status: ImportBatchStatus;
+  rows_parsed: number;
+  imported_count: number;
+  duplicate_count: number;
+  error_count: number;
+  metadata: Record<string, unknown>;
+  created_at: string;
 };
 
 export type PlaidItem = {

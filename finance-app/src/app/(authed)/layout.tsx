@@ -26,6 +26,12 @@ export default function AuthedLayout({
               Installments
             </Link>
             <Link
+              href="/imports"
+              className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              Imports
+            </Link>
+            <Link
               href="/connect"
               className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
             >
