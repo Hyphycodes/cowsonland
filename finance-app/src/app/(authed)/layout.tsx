@@ -20,6 +20,12 @@ export default function AuthedLayout({
               Dashboard
             </Link>
             <Link
+              href="/installments"
+              className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
+            >
+              Installments
+            </Link>
+            <Link
               href="/connect"
               className="text-zinc-600 dark:text-zinc-400 hover:text-zinc-900 dark:hover:text-zinc-100"
             >

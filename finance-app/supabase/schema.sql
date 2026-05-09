@@ -214,3 +214,123 @@ create trigger touch_accounts before update on public.accounts
 drop trigger if exists touch_transactions on public.transactions;
 create trigger touch_transactions before update on public.transactions
   for each row execute function public.touch_updated_at();
+
+-- =============================================================
+-- Installment plans (BNPL + card promos)
+-- See README "Installment tracking" for product context.
+-- =============================================================
+
+-- Allow new account sources. Drop any prior constraint first so this is
+-- safe to re-run.
+alter table public.accounts
+  drop constraint if exists accounts_source_check;
+alter table public.accounts
+  add constraint accounts_source_check
+  check (source in ('plaid', 'apple_card', 'manual_liability'));
+
+create table if not exists public.installment_plans (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null,
+  merchant text not null,
+  purchase_date date not null,
+  total_amount numeric(14, 2) not null,
+  term_months int not null check (term_months > 0),
+  monthly_minimum numeric(14, 2) not null,
+  apr numeric(5, 2) not null default 0,
+  promo_end_date date,
+  kind text not null check (kind in ('bnpl', 'card_promo')),
+  status text not null default 'active'
+    check (status in ('active', 'paid_off', 'defaulted')),
+  payment_source_account_id uuid references public.accounts(id) on delete set null,
+  liability_account_id uuid references public.accounts(id) on delete set null,
+  -- Category that the PURCHASE belongs to (Electronics, Furniture, etc).
+  -- Distinct from how monthly payment transactions are categorized.
+  purchase_category_id uuid references public.categories(id) on delete set null,
+  notes text,
+  paid_off_at timestamptz,
+  deleted_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists installment_plans_user_idx
+  on public.installment_plans(user_id);
+create index if not exists installment_plans_active_idx
+  on public.installment_plans(user_id, status)
+  where deleted_at is null;
+
+create table if not exists public.installment_payments (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  plan_id uuid not null references public.installment_plans(id) on delete cascade,
+  transaction_id uuid references public.transactions(id) on delete set null,
+  expected_date date not null,
+  expected_amount numeric(14, 2) not null,
+  actual_date date,
+  actual_amount numeric(14, 2),
+  status text not null default 'scheduled'
+    check (status in ('scheduled', 'paid', 'missed', 'partial', 'overpaid')),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists installment_payments_due_idx
+  on public.installment_payments(user_id, expected_date);
+create index if not exists installment_payments_plan_idx
+  on public.installment_payments(plan_id);
+
+alter table public.installment_plans    enable row level security;
+alter table public.installment_payments enable row level security;
+
+drop policy if exists "own installment plans" on public.installment_plans;
+create policy "own installment plans" on public.installment_plans
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "own installment payments" on public.installment_payments;
+create policy "own installment payments" on public.installment_payments
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop trigger if exists touch_installment_plans on public.installment_plans;
+create trigger touch_installment_plans before update on public.installment_plans
+  for each row execute function public.touch_updated_at();
+
+-- =============================================================
+-- spending_with_installments view
+--
+-- "Decision view" of spending. Counts each installment plan as a single
+-- spend at purchase_date, and EXCLUDES individual monthly installment
+-- payment transactions (they'd be double-counted otherwise).
+--
+-- security_invoker = on so RLS on the underlying tables applies — each
+-- user only sees their own rows.
+-- =============================================================
+drop view if exists public.spending_with_installments;
+create view public.spending_with_installments
+  with (security_invoker = on)
+  as
+  select
+    t.id              as id,
+    t.user_id         as user_id,
+    t.date            as date,
+    t.amount          as amount,
+    t.category_id     as category_id,
+    t.merchant_name   as merchant_name,
+    'transaction'::text as source_kind,
+    null::uuid        as plan_id
+  from public.transactions t
+  where t.id not in (
+    select transaction_id from public.installment_payments
+     where transaction_id is not null
+  )
+  union all
+  select
+    p.id              as id,
+    p.user_id         as user_id,
+    p.purchase_date   as date,
+    p.total_amount    as amount,
+    p.purchase_category_id as category_id,
+    p.merchant        as merchant_name,
+    'installment_purchase'::text as source_kind,
+    p.id              as plan_id
+  from public.installment_plans p
+  where p.deleted_at is null;

@@ -1,6 +1,14 @@
-import { createClient } from "@/lib/supabase/server";
-import type { Account, Transaction } from "@/types/db";
 import Link from "next/link";
+import { createClient } from "@/lib/supabase/server";
+import { computeProgress } from "@/lib/installments/schedule";
+import { fmtDate, fmtUsd } from "@/lib/installments/format";
+import type {
+  Account,
+  InstallmentPayment,
+  InstallmentPlan,
+  Transaction,
+} from "@/types/db";
+import SpendingMode from "./spending-mode";
 
 export const dynamic = "force-dynamic";
 
@@ -9,10 +17,31 @@ const fmt = (n: number | null) =>
     ? "—"
     : n.toLocaleString("en-US", { style: "currency", currency: "USD" });
 
-export default async function DashboardPage() {
+type SpendingRow = {
+  id: string;
+  date: string;
+  amount: number;
+  merchant_name: string | null;
+  source_kind: "transaction" | "installment_purchase";
+};
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ mode?: string }>;
+}) {
+  const sp = await searchParams;
+  const mode = sp.mode === "cash_flow" ? "cash_flow" : "decision";
+
   const supabase = await createClient();
 
-  const [{ data: accounts }, { data: transactions }] = await Promise.all([
+  const [
+    { data: accounts },
+    { data: transactions },
+    { data: plans },
+    { data: payments },
+    { data: spendingRows },
+  ] = await Promise.all([
     supabase
       .from("accounts")
       .select("*")
@@ -24,15 +53,145 @@ export default async function DashboardPage() {
       .order("date", { ascending: false })
       .limit(20)
       .returns<Transaction[]>(),
+    supabase
+      .from("installment_plans")
+      .select("*")
+      .is("deleted_at", null)
+      .eq("status", "active")
+      .returns<InstallmentPlan[]>(),
+    supabase
+      .from("installment_payments")
+      .select("*")
+      .returns<InstallmentPayment[]>(),
+    supabase
+      .from("spending_with_installments")
+      .select("id, date, amount, merchant_name, source_kind")
+      .order("date", { ascending: false })
+      .limit(20)
+      .returns<SpendingRow[]>(),
   ]);
 
-  const netWorth = (accounts ?? []).reduce(
-    (sum, a) => sum + (a.current_balance ?? 0) * (a.type === "credit" ? -1 : 1),
-    0,
+  // Net worth.
+  // - Credit-card balances (type='credit') count as negative.
+  // - manual_liability accounts also count as negative — they ARE debts.
+  // - Everything else (depository, investment) counts as positive.
+  // We do NOT subtract installment plan totals separately: BNPL plans are
+  // already represented by their manual_liability account, and card-promo
+  // plans are already part of the credit card balance.
+  const netWorth = (accounts ?? []).reduce((sum, a) => {
+    const bal = a.current_balance ?? 0;
+    const isLiability =
+      a.type === "credit" || a.source === "manual_liability";
+    return sum + bal * (isLiability ? -1 : 1);
+  }, 0);
+
+  // Card-promo reminders: any active card_promo plan with a scheduled
+  // payment within the next 3 days.
+  const today = new Date();
+  const threeDaysIso = new Date(today.getTime() + 3 * 86400000)
+    .toISOString()
+    .slice(0, 10);
+  const todayIso = today.toISOString().slice(0, 10);
+  const upcomingCardPromos: { plan: InstallmentPlan; due: string }[] = [];
+  for (const p of plans ?? []) {
+    if (p.kind !== "card_promo") continue;
+    const next = (payments ?? [])
+      .filter((x) => x.plan_id === p.id && x.status === "scheduled")
+      .sort((a, b) => a.expected_date.localeCompare(b.expected_date))[0];
+    if (next && next.expected_date >= todayIso && next.expected_date <= threeDaysIso) {
+      upcomingCardPromos.push({ plan: p, due: next.expected_date });
+    }
+  }
+
+  // Future net worth: 12-month projection.
+  // For now: each month subtract scheduled installment payments (cash out)
+  // and add back the corresponding liability decrease (debt down). For
+  // 0% APR plans these cancel exactly, so the line sits flat. The
+  // interesting variation kicks in once we model income / non-installment
+  // recurring spending — TODO.
+  const projection: { month: string; value: number }[] = [];
+  const startOfThisMonth = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    1,
   );
+  for (let i = 0; i <= 12; i++) {
+    const monthStart = new Date(
+      startOfThisMonth.getFullYear(),
+      startOfThisMonth.getMonth() + i,
+      1,
+    );
+    const monthEnd = new Date(
+      startOfThisMonth.getFullYear(),
+      startOfThisMonth.getMonth() + i + 1,
+      1,
+    );
+    const monthEndIso = monthEnd.toISOString().slice(0, 10);
+    // Sum scheduled payments up to monthEnd. With current model, net
+    // effect on net worth = 0 per dollar paid (cash − liability), so the
+    // projected value equals current netWorth. Keep the calc explicit so
+    // it's easy to swap in interest later.
+    const scheduledPaid = (payments ?? [])
+      .filter(
+        (p) => p.status === "scheduled" && p.expected_date <= monthEndIso,
+      )
+      .reduce((s, p) => s + p.expected_amount, 0);
+    const cashOut = scheduledPaid;
+    const liabilityDown = scheduledPaid;
+    projection.push({
+      month: monthStart.toISOString().slice(0, 7),
+      value: netWorth - cashOut + liabilityDown,
+    });
+  }
+
+  // Each plan's quick line under the chart.
+  const planLines = (plans ?? []).map((p) => {
+    const prog = computeProgress(
+      p,
+      (payments ?? []).filter((x) => x.plan_id === p.id),
+    );
+    return { plan: p, progress: prog };
+  });
+
+  const recent =
+    mode === "cash_flow"
+      ? (transactions ?? []).map((t) => ({
+          id: t.id,
+          date: t.date,
+          amount: t.amount,
+          merchant_name: t.merchant_name ?? t.raw_name,
+          source_kind: "transaction" as const,
+          plaid_category: t.plaid_category,
+        }))
+      : (spendingRows ?? []).map((r) => ({
+          id: r.id,
+          date: r.date,
+          amount: r.amount,
+          merchant_name: r.merchant_name,
+          source_kind: r.source_kind,
+          plaid_category: null as string | null,
+        }));
 
   return (
     <div className="space-y-10">
+      {/* Card-promo reminders */}
+      {upcomingCardPromos.length > 0 && (
+        <section className="rounded-md border border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/40 p-3 text-sm space-y-1">
+          <p className="font-medium">Mark these card-promo payments paid:</p>
+          {upcomingCardPromos.map(({ plan, due }) => (
+            <p key={plan.id}>
+              {plan.name} ({plan.merchant}) — due {fmtDate(due)}.{" "}
+              <Link
+                href={`/installments/${plan.id}`}
+                className="underline"
+              >
+                Open plan
+              </Link>
+            </p>
+          ))}
+        </section>
+      )}
+
       {/* Net worth tile */}
       <section>
         <p className="text-xs uppercase tracking-wide text-zinc-500">
@@ -40,6 +199,30 @@ export default async function DashboardPage() {
         </p>
         <p className="mt-1 text-4xl font-mono tabular-nums">{fmt(netWorth)}</p>
       </section>
+
+      {/* Future net worth */}
+      {projection.length > 0 && (
+        <section>
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500 mb-3">
+            Future net worth (12mo)
+          </h2>
+          <FutureChart points={projection} />
+          {planLines.length > 0 && (
+            <ul className="mt-3 space-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+              {planLines.map(({ plan, progress }) => (
+                <li key={plan.id} className="font-mono tabular-nums">
+                  {plan.name} @ {plan.merchant} —{" "}
+                  {fmtUsd(progress.remaining_balance)} remaining, projected
+                  payoff{" "}
+                  {progress.payoff_projected_date
+                    ? fmtDate(progress.payoff_projected_date)
+                    : "—"}
+                </li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
 
       {/* Accounts */}
       <section>
@@ -65,7 +248,9 @@ export default async function DashboardPage() {
                 <div>
                   <p className="text-sm font-medium">{a.name}</p>
                   <p className="text-xs text-zinc-500">
-                    {a.type ?? "—"}
+                    {a.source === "manual_liability"
+                      ? "installment liability"
+                      : a.type ?? "—"}
                     {a.mask ? ` ···· ${a.mask}` : ""}
                   </p>
                 </div>
@@ -86,22 +271,29 @@ export default async function DashboardPage() {
         )}
       </section>
 
-      {/* Recent transactions */}
+      {/* Spending */}
       <section>
-        <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500 mb-3">
-          Recent transactions
-        </h2>
-
-        {transactions && transactions.length > 0 ? (
+        <div className="flex items-baseline justify-between mb-3">
+          <h2 className="text-sm font-medium uppercase tracking-wide text-zinc-500">
+            Spending by purchase decision
+          </h2>
+          <SpendingMode current={mode} />
+        </div>
+        {recent.length > 0 ? (
           <ul className="divide-y divide-zinc-200 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-800 rounded-md">
-            {transactions.map((t) => (
+            {recent.map((t) => (
               <li
                 key={t.id}
                 className="px-4 py-3 flex items-center justify-between text-sm"
               >
                 <div className="min-w-0">
                   <p className="font-medium truncate">
-                    {t.merchant_name ?? t.raw_name ?? "Unknown"}
+                    {t.merchant_name ?? "Unknown"}
+                    {t.source_kind === "installment_purchase" && (
+                      <span className="ml-2 text-xs text-zinc-500">
+                        installment
+                      </span>
+                    )}
                   </p>
                   <p className="text-xs text-zinc-500">
                     {t.date}
@@ -125,5 +317,39 @@ export default async function DashboardPage() {
         )}
       </section>
     </div>
+  );
+}
+
+function FutureChart({
+  points,
+}: {
+  points: { month: string; value: number }[];
+}) {
+  const w = 600;
+  const h = 80;
+  const max = Math.max(...points.map((p) => p.value));
+  const min = Math.min(...points.map((p) => p.value));
+  const range = max - min || 1;
+  const stepX = w / Math.max(1, points.length - 1);
+  const path = points
+    .map((p, i) => {
+      const x = i * stepX;
+      const y = h - ((p.value - min) / range) * (h - 6) - 3;
+      return `${i === 0 ? "M" : "L"}${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      viewBox={`0 0 ${w} ${h}`}
+      className="w-full h-24"
+      preserveAspectRatio="none"
+    >
+      <path
+        d={path}
+        fill="none"
+        strokeWidth={1.5}
+        className="stroke-zinc-700 dark:stroke-zinc-300"
+      />
+    </svg>
   );
 }

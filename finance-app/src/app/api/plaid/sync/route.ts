@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { plaidClient } from "@/lib/plaid/client";
 import { createServiceClient, createClient } from "@/lib/supabase/server";
-import type { PlaidItem } from "@/types/db";
+import { tryAutoLinkInstallment } from "@/lib/installments/auto-link";
+import type { PlaidItem, Transaction } from "@/types/db";
 
 /**
  * Sync endpoint. Three callers:
@@ -75,12 +76,29 @@ async function syncAllItems() {
           }));
 
         if (rows.length) {
-          const { error: txErr } = await admin
+          const { data: upserted, error: txErr } = await admin
             .from("transactions")
-            .upsert(rows, { onConflict: "plaid_transaction_id" });
+            .upsert(rows, { onConflict: "plaid_transaction_id" })
+            .select("id, user_id, date, amount, merchant_name, raw_name")
+            .returns<
+              Pick<
+                Transaction,
+                "id" | "user_id" | "date" | "amount" | "merchant_name" | "raw_name"
+              >[]
+            >();
           if (txErr) throw txErr;
           totalAdded += data.added.length;
           totalModified += data.modified.length;
+
+          // Try BNPL auto-link for each freshly upserted transaction.
+          // Failures here must not break the sync.
+          for (const tx of upserted ?? []) {
+            try {
+              await tryAutoLinkInstallment(admin, tx);
+            } catch (err) {
+              console.error("auto-link failed", err);
+            }
+          }
         }
       }
 

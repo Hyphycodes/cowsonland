@@ -17,9 +17,54 @@ export type Account = {
   current_balance: number | null;
   available_balance: number | null;
   currency_code: string | null;
-  source: "plaid" | "apple_card";
+  source: "plaid" | "apple_card" | "manual_liability";
   created_at: string;
   updated_at: string;
+};
+
+export type InstallmentKind = "bnpl" | "card_promo";
+export type InstallmentStatus = "active" | "paid_off" | "defaulted";
+export type InstallmentPaymentStatus =
+  | "scheduled"
+  | "paid"
+  | "missed"
+  | "partial"
+  | "overpaid";
+
+export type InstallmentPlan = {
+  id: string;
+  user_id: string;
+  name: string;
+  merchant: string;
+  purchase_date: string;
+  total_amount: number;
+  term_months: number;
+  monthly_minimum: number;
+  apr: number;
+  promo_end_date: string | null;
+  kind: InstallmentKind;
+  status: InstallmentStatus;
+  payment_source_account_id: string | null;
+  liability_account_id: string | null;
+  purchase_category_id: string | null;
+  notes: string | null;
+  paid_off_at: string | null;
+  deleted_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InstallmentPayment = {
+  id: string;
+  user_id: string;
+  plan_id: string;
+  transaction_id: string | null;
+  expected_date: string;
+  expected_amount: number;
+  actual_date: string | null;
+  actual_amount: number | null;
+  status: InstallmentPaymentStatus;
+  created_at: string;
 };
 
 export type Transaction = {
