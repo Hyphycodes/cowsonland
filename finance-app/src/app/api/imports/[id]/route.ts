@@ -2,9 +2,10 @@ import { NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { ingestTransactions } from "@/lib/ingestion/ingest";
 import { normalizeCsvRow } from "@/lib/ingestion/normalize";
-import { APPLE_CARD_PRESET } from "@/lib/ingestion/presets/apple-card";
-import type { CsvMapping, NormalizedTx } from "@/lib/ingestion/types";
-import type { ImportBatch, ImportBatchSource } from "@/types/db";
+import { CSV_PRESETS } from "@/lib/ingestion/presets";
+import { categorizeUnresolvedWithClaude } from "@/lib/ai/categorize";
+import type { CsvDetection, CsvMapping, NormalizedTx } from "@/lib/ingestion/types";
+import type { CategorySource, ImportBatch, ImportBatchSource } from "@/types/db";
 
 export async function GET(
   _: Request,
@@ -30,12 +31,16 @@ export async function GET(
     headers?: string[];
     staging_rows?: Record<string, string>[];
     suggested_preset?: string | null;
+    suggested_mapping?: CsvMapping | null;
+    detection?: CsvDetection | null;
   };
 
   return NextResponse.json({
     batch: { ...data, metadata: undefined },
     headers: md.headers ?? [],
     suggested_preset: md.suggested_preset ?? null,
+    suggested_mapping: md.suggested_mapping ?? md.detection?.mapping ?? null,
+    detection: md.detection ?? null,
     sample_rows: (md.staging_rows ?? []).slice(0, 5),
     pending_row_count: md.staging_rows?.length ?? 0,
   });
@@ -45,7 +50,7 @@ type FinalizeBody = {
   account_id?: string;
   new_account?: { name: string; type?: string | null };
   mapping: CsvMapping;
-  use_preset?: "apple_card" | null;
+  use_preset?: string | null;
 };
 
 /**
@@ -90,6 +95,7 @@ export async function POST(
 
   const md = (batch.metadata ?? {}) as {
     staging_rows?: Record<string, string>[];
+    detection?: CsvDetection | null;
   };
   const stagingRows = md.staging_rows ?? [];
   if (stagingRows.length === 0) {
@@ -106,7 +112,7 @@ export async function POST(
         name: body.new_account.name,
         type: body.new_account.type ?? null,
         currency_code: "USD",
-        source: batch.source === "apple_card" ? "apple_card" : "manual",
+        source: batch.source === "apple_card" ? "apple_card" : "csv",
       })
       .select("id")
       .single();
@@ -126,10 +132,10 @@ export async function POST(
     );
 
   // Pick the mapping: explicit body.mapping overrides preset.
-  const mapping: CsvMapping =
-    body.use_preset === "apple_card"
-      ? APPLE_CARD_PRESET.mapping
-      : body.mapping;
+  const preset = body.use_preset
+    ? CSV_PRESETS.find((p) => p.id === body.use_preset)
+    : null;
+  const mapping: CsvMapping = preset?.mapping ?? body.mapping;
   if (!mapping?.date) {
     return NextResponse.json({ error: "missing_mapping" }, { status: 400 });
   }
@@ -163,6 +169,22 @@ export async function POST(
     return NextResponse.json({ error: "ingest_failed" }, { status: 500 });
   }
 
+  if (summary.inserted_ids.length > 0) {
+    try {
+      const ai = await categorizeUnresolvedWithClaude(admin, {
+        user_id: user.id,
+        transaction_ids: summary.inserted_ids,
+      });
+      summary.ai_categorized = ai.categorized;
+      summary.review_needed = ai.review_needed;
+    } catch (err) {
+      console.error("ai categorization", err);
+      summary.ai_categorized = 0;
+    }
+  }
+
+  const reviewNeeded = await countReviewNeeded(admin, summary.inserted_ids);
+
   await admin
     .from("import_batches")
     .update({
@@ -171,7 +193,13 @@ export async function POST(
       duplicate_count: summary.duplicates,
       error_count: errors + summary.errors,
       // Clear staging rows; batch row stays as a permanent receipt.
-      metadata: {},
+      metadata: {
+        detection: md.detection ?? null,
+        finalized_mapping: mapping,
+        rules_matched: summary.rules_matched ?? 0,
+        ai_categorized: summary.ai_categorized ?? 0,
+        review_needed: reviewNeeded,
+      },
     })
     .eq("id", batch.id);
 
@@ -179,6 +207,23 @@ export async function POST(
     ok: true,
     summary: { ...summary, errors: errors + summary.errors },
   });
+}
+
+async function countReviewNeeded(
+  admin: ReturnType<typeof createServiceClient>,
+  ids: string[],
+) {
+  if (ids.length === 0) return 0;
+  const { data } = await admin
+    .from("transactions")
+    .select("id, category_source")
+    .in("id", ids)
+    .in("category_source", [
+      "none",
+      "plaid_default",
+      "ai",
+    ] satisfies CategorySource[]);
+  return data?.length ?? 0;
 }
 
 export async function DELETE(

@@ -12,8 +12,11 @@ export default function ConnectPage() {
   // Fetch a link token on mount.
   useEffect(() => {
     fetch("/api/plaid/create-link-token", { method: "POST" })
-      .then((r) => r.json())
-      .then((d) => setLinkToken(d.link_token))
+      .then(async (r) => {
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error ?? "plaid_error");
+        setLinkToken(d.link_token);
+      })
       .catch(() => setStatus("Failed to initialize Plaid Link."));
   }, []);
 
@@ -48,8 +51,8 @@ export default function ConnectPage() {
       <div>
         <h1 className="text-2xl font-medium tracking-tight">Connect a bank</h1>
         <p className="text-sm text-zinc-500 mt-1">
-          Chase, Discover, and Capital One via Plaid. Apple Card import coming
-          in Phase 4.
+          Link accounts with Plaid when configured, or use CSV imports from the
+          Imports page.
         </p>
       </div>
 

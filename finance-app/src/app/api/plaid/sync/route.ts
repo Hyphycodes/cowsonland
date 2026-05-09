@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { plaidClient } from "@/lib/plaid/client";
 import { createServiceClient, createClient } from "@/lib/supabase/server";
 import { tryAutoLinkInstallment } from "@/lib/installments/auto-link";
+import { fingerprint } from "@/lib/ingestion/fingerprint";
 import type { PlaidItem, Transaction } from "@/types/db";
 
 /**
@@ -73,6 +74,17 @@ async function syncAllItems() {
           .map(({ plaid_account_id, ...rest }) => ({
             ...rest,
             account_id: idMap.get(plaid_account_id)!,
+            source: "plaid",
+            source_account_id: idMap.get(plaid_account_id)!,
+            external_transaction_id: rest.plaid_transaction_id,
+            dedupe_fingerprint: fingerprint({
+              user_id: rest.user_id,
+              source: "plaid",
+              source_account_id: idMap.get(plaid_account_id)!,
+              date: rest.date,
+              amount: rest.amount,
+              merchant: rest.merchant_name ?? rest.raw_name,
+            }),
           }));
 
         if (rows.length) {

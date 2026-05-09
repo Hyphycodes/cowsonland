@@ -1,123 +1,144 @@
-# Finance
+# Finance App
 
-Personal finance app. Single-user, locked to one email. Pulls transactions
-from Chase, Discover, and Capital One via Plaid. Apple Card via monthly CSV
-(Phase 4).
+Single-user personal finance app with CSV-first transaction import, rules,
+review queue, optional Plaid sync, and optional Claude-assisted CSV mapping
+and categorization.
 
 ## Stack
 
 - Next.js 15 App Router + TypeScript
-- Supabase (Postgres + Auth + RLS)
-- Plaid Trial Plan (free, 10 production Items)
-- Tailwind for styling
-- Vercel for hosting + nightly cron
+- Supabase Postgres, Auth, and RLS
+- CSV import for cards and banks
+- Optional Plaid Transactions
+- Optional Anthropic Claude API
+- Vercel hosting and cron
 
-## Phase 1 setup
-
-### 1. Install
+## Local Setup
 
 ```bash
 npm install
-cp .env.local.example .env.local
+cp .env.example .env.local
 ```
 
-### 2. Create the Supabase project
-
-1. Go to https://supabase.com → New Project.
-2. Settings → API: copy the URL and the **anon** + **service_role** keys.
-3. SQL Editor → paste the contents of `supabase/schema.sql` and run.
-4. Authentication → Providers → enable **Email**. Disable signups
-   (Authentication → Providers → Email → "Confirm email" on, "Enable signups"
-   off — the allowlist also blocks unauth'd emails, but defense in depth).
-5. Authentication → URL Configuration → Site URL: `http://localhost:3000`.
-   Redirect URLs: add `http://localhost:3000/auth/callback`.
-
-Fill in the four `NEXT_PUBLIC_SUPABASE_*` and `SUPABASE_SERVICE_ROLE_KEY`
-values in `.env.local`. Set `ALLOWED_EMAILS` to your email address.
-
-### 3. Create the Plaid sandbox account
-
-1. https://dashboard.plaid.com → Sign up.
-2. Team Settings → Keys: copy `client_id` and the **Sandbox** secret.
-3. Set `PLAID_ENV=sandbox`. Leave `PLAID_PRODUCTS=transactions`.
-
-When you're ready for real banks (Phase 3), apply for the Trial Plan
-at https://dashboard.plaid.com/trial-plan and switch `PLAID_ENV` to
-`production` with the production secret.
-
-### 4. Run
+Create a Supabase project, run `supabase/schema.sql` in the SQL editor, then
+fill in `.env.local`.
 
 ```bash
 npm run dev
 ```
 
-Open http://localhost:3000. Enter your email, get the magic link from
-Supabase email logs (or your inbox — set up SMTP in Supabase
-Authentication → Email Templates if you want real delivery), click through.
-You'll land on `/dashboard`. Hit `/connect` to link a sandbox bank.
+Open `http://localhost:3000`, sign in with the allowlisted email, then use
+`/imports` to upload CSV statements. Plaid is optional; `/connect` only works
+after Plaid env vars are configured.
 
-In sandbox: any of Plaid's sample institutions work. Use credentials
-`user_good` / `pass_good`.
+## Supabase Setup
 
-### 5. Deploy to Vercel
+1. Create a Supabase project.
+2. Go to Settings > API and copy:
+   - Project URL
+   - anon public key
+   - service_role key
+3. SQL Editor: paste and run `supabase/schema.sql`.
+4. Authentication > Providers > Email:
+   - enable Email
+   - keep email confirmation on if you want magic-link confirmation
+   - disable public signups if this is only for you
+5. Authentication > URL Configuration:
+   - Site URL: `http://localhost:3000`
+   - Redirect URL: `http://localhost:3000/auth/callback`
+   - after Vercel deploy, also add `https://your-app.vercel.app/auth/callback`
 
-```bash
-vercel
-```
+The schema file is idempotent and includes tables, RLS policies, indexes,
+category/rule/import columns, and AI categorization columns. For production,
+apply schema changes through Supabase migrations or the SQL editor before
+deploying code that depends on them.
 
-Add every env var from `.env.local` to your Vercel project. Update
-`NEXT_PUBLIC_SITE_URL` to your Vercel URL and add it to the Supabase
-redirect URL allowlist. Update `PLAID_WEBHOOK_URL` to
-`https://your-app.vercel.app/api/plaid/sync`.
+## Required Env Vars
 
-## Project structure
-
-```
-src/
-├── app/
-│   ├── (authed)/                 # Auth-gated routes
-│   │   ├── dashboard/page.tsx    # Net worth, accounts, recent transactions
-│   │   ├── connect/page.tsx      # Plaid Link UI
-│   │   └── layout.tsx
-│   ├── api/
-│   │   ├── plaid/
-│   │   │   ├── create-link-token/route.ts
-│   │   │   ├── exchange-token/route.ts
-│   │   │   └── sync/route.ts     # Webhook + cron + ad-hoc sync
-│   │   └── auth/signout/route.ts
-│   ├── auth/callback/route.ts    # Magic-link landing
-│   ├── login/                    # Public login page
-│   ├── layout.tsx
-│   └── page.tsx
-├── lib/
-│   ├── auth/allowlist.ts         # Email allowlist check
-│   ├── plaid/client.ts           # Plaid SDK init
-│   └── supabase/                 # Browser, server, service-role clients
-└── types/db.ts                   # Hand-rolled DB types
-middleware.ts                     # Session refresh + allowlist gate
-supabase/schema.sql               # All tables + RLS policies
-vercel.json                       # Cron schedule
-```
-
-## What's intentionally not here yet
-
-These belong to later phases — the scaffold stays small.
-
-- **PWA** (Phase 4) — install `next-pwa`, add manifest/service worker.
-- **Apple Card CSV import** (Phase 4) — file upload + parser.
-- **Categorization rules + budgets + goals UI** (Phase 5).
-- **Claude chat over transactions** (Phase 5).
-- **Plaid webhook signature verification** (Phase 3) — required before
-  pointing the webhook at production.
-- **Generated DB types** — replace `src/types/db.ts` with the output of
-  `supabase gen types typescript --project-id <ref>` once the schema settles.
-
-## Cron
-
-`vercel.json` schedules `/api/plaid/sync` daily at 9:00 UTC. The endpoint
-authorizes via `Authorization: Bearer ${CRON_SECRET}`. Locally, you can
-trigger it manually:
+Required for local and production:
 
 ```bash
-curl -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/plaid/sync
+NEXT_PUBLIC_SUPABASE_URL=
+NEXT_PUBLIC_SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+ALLOWED_EMAILS=you@example.com
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
+CRON_SECRET=
 ```
+
+Optional Plaid:
+
+```bash
+PLAID_CLIENT_ID=
+PLAID_SECRET=
+PLAID_ENV=sandbox
+PLAID_PRODUCTS=transactions
+PLAID_COUNTRY_CODES=US
+PLAID_DAYS_REQUESTED=730
+PLAID_WEBHOOK_URL=
+```
+
+Optional Claude:
+
+```bash
+ANTHROPIC_API_KEY=
+ANTHROPIC_MODEL=claude-3-5-haiku-latest
+```
+
+`SUPABASE_SERVICE_ROLE_KEY`, `PLAID_SECRET`, `CRON_SECRET`, and
+`ANTHROPIC_API_KEY` are server-only secrets. Do not prefix them with
+`NEXT_PUBLIC_`.
+
+## Vercel Deploy
+
+1. Import the repo into Vercel or run `vercel`.
+2. Set the project root to `finance-app` if deploying from the parent folder.
+3. Add every required env var from `.env.local` in Vercel Project Settings.
+4. Set `NEXT_PUBLIC_SITE_URL=https://your-app.vercel.app`.
+5. In Supabase Auth URL Configuration, add:
+   - `https://your-app.vercel.app`
+   - `https://your-app.vercel.app/auth/callback`
+6. If using Plaid, set `PLAID_WEBHOOK_URL=https://your-app.vercel.app/api/plaid/sync`.
+7. Deploy. Vercel will run `npm run build`.
+
+`vercel.json` schedules `/api/plaid/sync` daily at 09:00 UTC. The endpoint
+requires `Authorization: Bearer $CRON_SECRET`; Vercel Cron sends that header
+when `CRON_SECRET` is configured.
+
+## What Works Without Plaid
+
+- CSV upload/import for Apple Card, Chase, Capital One, American Express,
+  Discover, and generic bank/card CSVs
+- column mapping review and overrides
+- normalization, dedupe, transaction rules, review queue
+- manual categorization, splits, categories, installments
+
+## What Works Without Claude
+
+- known CSV presets
+- heuristic header inference
+- manual column mapping
+- deterministic rules
+- review queue and manual/rule categorization
+
+Claude only improves low-confidence CSV mapping and suggests categories/rules
+for transactions that remain uncategorized after rules run.
+
+## Verification
+
+Before deploy:
+
+```bash
+npm test
+npm run typecheck
+npm run build
+```
+
+## Notes
+
+- Service-role Supabase access is isolated to server files.
+- Manual categorization is never overwritten by rules or AI.
+- Rules can override AI suggestions because AI is only a reviewable fallback.
+- Plaid webhook signature verification is still not implemented; anonymous
+  Plaid POSTs are rejected unless routed through an authenticated or cron-secret
+  caller.

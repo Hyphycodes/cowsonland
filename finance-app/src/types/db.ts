@@ -17,7 +17,7 @@ export type Account = {
   current_balance: number | null;
   available_balance: number | null;
   currency_code: string | null;
-  source: "plaid" | "apple_card" | "manual_liability";
+  source: "plaid" | "apple_card" | "manual_liability" | "csv" | "manual";
   created_at: string;
   updated_at: string;
 };
@@ -89,6 +89,9 @@ export type Transaction = {
   plaid_category_detailed: string | null;
   category_id: string | null;
   ai_category: string | null;
+  ai_category_reason: string | null;
+  ai_confidence: number | null;
+  ai_suggested_rule: Record<string, unknown> | null;
   pending: boolean;
   notes: string | null;
   source: TransactionSource | null;
@@ -106,7 +109,7 @@ export type Transaction = {
 };
 
 export type CategoryType = "income" | "expense" | "transfer";
-export type CategorySource = "manual" | "rule" | "plaid_default" | "none";
+export type CategorySource = "manual" | "rule" | "plaid_default" | "ai" | "none";
 
 export type Category = {
   id: string;

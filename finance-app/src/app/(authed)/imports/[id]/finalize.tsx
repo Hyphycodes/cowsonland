@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import type { Account, ImportBatchSource } from "@/types/db";
-import type { CsvMapping } from "@/lib/ingestion/types";
+import type { CsvDetection, CsvMapping } from "@/lib/ingestion/types";
 
 type Props = {
   batchId: string;
@@ -12,6 +12,8 @@ type Props = {
   headers: string[];
   sampleRows: Record<string, string>[];
   suggestedPreset: string | null;
+  suggestedMapping: CsvMapping | null;
+  detection: CsvDetection | null;
   rowCount: number;
   accounts: Account[];
 };
@@ -20,24 +22,33 @@ const NONE = "";
 
 export default function FinalizeFlow(props: Props) {
   const router = useRouter();
-  const usingPreset = props.suggestedPreset === "apple_card";
+  const usingPreset = Boolean(props.suggestedPreset);
   const [usePreset, setUsePreset] = useState(usingPreset);
 
   const [mapping, setMapping] = useState<CsvMapping>({
-    date: pickHeader(props.headers, ["date", "transaction date"]) ?? NONE,
+    ...(props.suggestedMapping ?? {}),
+    date:
+      props.suggestedMapping?.date ??
+      pickHeader(props.headers, ["date", "transaction date"]) ??
+      NONE,
     amount:
-      pickHeader(props.headers, ["amount", "amount (usd)"]) ?? NONE,
-    merchant: pickHeader(props.headers, ["merchant"]) ?? NONE,
+      props.suggestedMapping?.amount ??
+      pickHeader(props.headers, ["amount", "amount (usd)"]) ??
+      NONE,
+    merchant:
+      props.suggestedMapping?.merchant ??
+      pickHeader(props.headers, ["merchant"]) ??
+      NONE,
     description:
-      pickHeader(props.headers, ["description", "memo", "name"]) ?? NONE,
+      props.suggestedMapping?.description ??
+      pickHeader(props.headers, ["description", "memo", "name"]) ??
+      NONE,
     external_id:
-      pickHeader(props.headers, [
-        "transaction id",
-        "id",
-        "reference",
-      ]) ?? NONE,
-    amount_inverted: false,
-    date_format: "auto",
+      props.suggestedMapping?.external_id ??
+      pickHeader(props.headers, ["transaction id", "id", "reference"]) ??
+      NONE,
+    amount_inverted: props.suggestedMapping?.amount_inverted ?? false,
+    date_format: props.suggestedMapping?.date_format ?? "auto",
   });
 
   const [accountId, setAccountId] = useState<string>(
@@ -55,7 +66,7 @@ export default function FinalizeFlow(props: Props) {
     setSubmitting(true);
     try {
       const body: Record<string, unknown> = { mapping };
-      if (usePreset) body.use_preset = "apple_card";
+      if (usePreset) body.use_preset = props.suggestedPreset;
       if (accountId) body.account_id = accountId;
       else if (newAccountName)
         body.new_account = { name: newAccountName };
@@ -95,15 +106,32 @@ export default function FinalizeFlow(props: Props) {
         </p>
       </div>
 
-      {props.suggestedPreset === "apple_card" && (
+      {props.detection && (
+        <section className="rounded-md border border-zinc-200 dark:border-zinc-800 p-4 text-sm">
+          <p className="font-medium">
+            Detected{" "}
+            {props.detection.institution ??
+              props.detection.preset_name ??
+              "unknown CSV format"}
+          </p>
+          <p className="text-xs text-zinc-500 mt-1">
+            {props.detection.method} ·{" "}
+            {Math.round(props.detection.confidence * 100)}% confidence
+            {props.detection.needs_user_mapping
+              ? " · review the mapping before importing"
+              : ""}
+          </p>
+        </section>
+      )}
+
+      {props.suggestedPreset && (
         <label className="flex items-center gap-2 text-sm">
           <input
             type="checkbox"
             checked={usePreset}
             onChange={(e) => setUsePreset(e.target.checked)}
           />
-          Use Apple Card preset (auto-maps Transaction Date, Merchant,
-          Description, Amount).
+          Use detected preset mapping.
         </label>
       )}
 
@@ -153,6 +181,24 @@ export default function FinalizeFlow(props: Props) {
               value={mapping.external_id ?? NONE}
               headers={props.headers}
               onChange={(v) => update({ external_id: v || undefined })}
+            />
+            <Select
+              label="Source category"
+              value={mapping.category ?? NONE}
+              headers={props.headers}
+              onChange={(v) => update({ category: v || undefined })}
+            />
+            <Select
+              label="Memo"
+              value={mapping.memo ?? NONE}
+              headers={props.headers}
+              onChange={(v) => update({ memo: v || undefined })}
+            />
+            <Select
+              label="Reference"
+              value={mapping.reference ?? NONE}
+              headers={props.headers}
+              onChange={(v) => update({ reference: v || undefined })}
             />
             <label className="text-xs text-zinc-500">
               Date format

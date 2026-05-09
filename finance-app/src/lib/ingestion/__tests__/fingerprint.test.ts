@@ -33,8 +33,8 @@ describe("fingerprint", () => {
     ).not.toBe(fingerprint(base));
   });
 
-  it("differs when source changes", () => {
-    expect(fingerprint({ ...base, source: "plaid" })).not.toBe(
+  it("matches across sources for the same account/date/amount/merchant", () => {
+    expect(fingerprint({ ...base, source: "plaid" })).toBe(
       fingerprint(base),
     );
   });

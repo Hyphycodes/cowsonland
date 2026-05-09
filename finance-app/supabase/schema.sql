@@ -106,6 +106,9 @@ create table if not exists public.transactions (
   -- User override / AI-suggested category
   category_id uuid references public.categories(id) on delete set null,
   ai_category text,
+  ai_category_reason text,
+  ai_confidence numeric,
+  ai_suggested_rule jsonb,
   pending boolean not null default false,
   notes text,
   created_at timestamptz not null default now(),
@@ -416,10 +419,23 @@ create unique index if not exists transactions_user_external_unique
   where external_transaction_id is not null;
 
 -- Backfill: existing Plaid rows predate these columns. Stamp source/external
--- so dedupe works against them too.
+-- and a cross-source fingerprint so later CSV imports into the same account
+-- can dedupe against Plaid rows.
 update public.transactions
   set source = 'plaid',
-      external_transaction_id = plaid_transaction_id
+      source_account_id = account_id::text,
+      external_transaction_id = plaid_transaction_id,
+      dedupe_fingerprint = encode(
+        digest(
+          user_id::text || '|' ||
+          account_id::text || '|' ||
+          date::text || '|' ||
+          round(amount * 100)::text || '|' ||
+          regexp_replace(lower(coalesce(merchant_name, raw_name, '')), '[^a-z0-9]', '', 'g'),
+          'sha256'
+        ),
+        'hex'
+      )
   where source is null
     and plaid_transaction_id is not null;
 
@@ -443,10 +459,16 @@ alter table public.categories
 alter table public.transactions
   add column if not exists category_source text not null default 'none';
 alter table public.transactions
+  add column if not exists ai_category_reason text;
+alter table public.transactions
+  add column if not exists ai_confidence numeric;
+alter table public.transactions
+  add column if not exists ai_suggested_rule jsonb;
+alter table public.transactions
   drop constraint if exists transactions_category_source_check;
 alter table public.transactions
   add constraint transactions_category_source_check
-  check (category_source in ('manual', 'rule', 'plaid_default', 'none'));
+  check (category_source in ('manual', 'rule', 'plaid_default', 'ai', 'none'));
 alter table public.transactions
   add column if not exists is_split boolean not null default false;
 

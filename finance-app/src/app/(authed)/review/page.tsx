@@ -11,7 +11,7 @@ export default async function ReviewPage() {
     supabase
       .from("transactions")
       .select("*")
-      .in("category_source", ["none", "plaid_default"])
+      .in("category_source", ["none", "plaid_default", "ai"])
       .order("date", { ascending: false })
       .limit(100)
       .returns<Transaction[]>(),

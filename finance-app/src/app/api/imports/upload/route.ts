@@ -1,10 +1,8 @@
 import { NextResponse } from "next/server";
 import { createClient, createServiceClient } from "@/lib/supabase/server";
 import { parseCsv } from "@/lib/ingestion/csv/parse";
-import {
-  APPLE_CARD_PRESET,
-  looksLikeAppleCard,
-} from "@/lib/ingestion/presets/apple-card";
+import { detectCsvFormat } from "@/lib/ingestion/presets";
+import { suggestCsvMappingWithClaude } from "@/lib/ingestion/ai-mapping";
 
 const MAX_BYTES = 5 * 1024 * 1024;
 
@@ -47,8 +45,29 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "empty_csv" }, { status: 400 });
   }
 
-  const isApple = looksLikeAppleCard(headers);
-  const source = isApple ? "apple_card" : "csv";
+  let detection = detectCsvFormat(headers, rows.slice(0, 10));
+  const aiMapping =
+    detection.needs_user_mapping || detection.confidence < 0.8
+      ? await suggestCsvMappingWithClaude({
+          headers,
+          sampleRows: rows.slice(0, 5),
+        })
+      : null;
+  if (aiMapping && aiMapping.confidence > detection.confidence) {
+    detection = {
+      ...detection,
+      institution: aiMapping.institution ?? detection.institution,
+      confidence: aiMapping.confidence,
+      mapping: aiMapping.mapping,
+      needs_user_mapping: aiMapping.confidence < 0.75,
+      method: "ai",
+      notes: aiMapping.notes,
+    };
+  }
+  const suggestedPreset =
+    detection.method === "preset" && !detection.needs_user_mapping
+      ? detection.preset_id
+      : null;
 
   // Write through service-role: we want metadata.staging_rows server-side
   // so the user can leave the page and come back later.
@@ -57,14 +76,16 @@ export async function POST(request: Request) {
     .from("import_batches")
     .insert({
       user_id: user.id,
-      source,
+      source: detection.source,
       filename: file.name,
       status: "pending",
       rows_parsed: rows.length,
       metadata: {
         headers,
         staging_rows: rows,
-        suggested_preset: isApple ? APPLE_CARD_PRESET.id : null,
+        detection,
+        suggested_preset: suggestedPreset,
+        suggested_mapping: detection.mapping,
       },
     })
     .select("id, source, status, rows_parsed, filename")
@@ -82,6 +103,8 @@ export async function POST(request: Request) {
     batch,
     headers,
     sample_rows: rows.slice(0, 5),
-    suggested_preset: isApple ? APPLE_CARD_PRESET.id : null,
+    detection,
+    suggested_preset: suggestedPreset,
+    suggested_mapping: detection.mapping,
   });
 }

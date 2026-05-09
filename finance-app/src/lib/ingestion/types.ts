@@ -32,6 +32,9 @@ export type IngestSummary = {
   inserted_ids: string[];
   /** Set by post-ingest rule pass; absent if no inserts happened. */
   rules_matched?: number;
+  /** Set by optional AI fallback categorization. */
+  ai_categorized?: number;
+  review_needed?: number;
 };
 
 /**
@@ -49,6 +52,30 @@ export type CsvMapping = {
   credit?: string;
   merchant?: string;
   description?: string;
+  category?: string;
+  memo?: string;
+  reference?: string;
   external_id?: string;
   date_format?: "auto" | "MM/DD/YYYY" | "DD/MM/YYYY" | "YYYY-MM-DD";
+};
+
+export type CsvPreset = {
+  id: string;
+  name: string;
+  institution: string;
+  source: "csv" | "apple_card";
+  signature: string[];
+  mapping: CsvMapping;
+};
+
+export type CsvDetection = {
+  preset_id: string | null;
+  preset_name: string | null;
+  institution: string | null;
+  confidence: number;
+  mapping: CsvMapping | null;
+  needs_user_mapping: boolean;
+  source: "csv" | "apple_card";
+  method: "preset" | "heuristic" | "ai" | "none";
+  notes?: string | null;
 };

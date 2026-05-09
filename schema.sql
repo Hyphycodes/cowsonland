@@ -106,6 +106,9 @@ create table if not exists public.transactions (
   -- User override / AI-suggested category
   category_id uuid references public.categories(id) on delete set null,
   ai_category text,
+  ai_category_reason text,
+  ai_confidence numeric,
+  ai_suggested_rule jsonb,
   pending boolean not null default false,
   notes text,
   created_at timestamptz not null default now(),
@@ -214,3 +217,355 @@ create trigger touch_accounts before update on public.accounts
 drop trigger if exists touch_transactions on public.transactions;
 create trigger touch_transactions before update on public.transactions
   for each row execute function public.touch_updated_at();
+
+-- =============================================================
+-- Installment plans (BNPL + card promos)
+-- See README "Installment tracking" for product context.
+-- =============================================================
+
+-- Allow new account sources. Drop any prior constraint first so this is
+-- safe to re-run.
+alter table public.accounts
+  drop constraint if exists accounts_source_check;
+alter table public.accounts
+  add constraint accounts_source_check
+  check (source in ('plaid', 'apple_card', 'manual_liability'));
+
+create table if not exists public.installment_plans (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null,
+  merchant text not null,
+  purchase_date date not null,
+  total_amount numeric(14, 2) not null,
+  term_months int not null check (term_months > 0),
+  monthly_minimum numeric(14, 2) not null,
+  apr numeric(5, 2) not null default 0,
+  promo_end_date date,
+  kind text not null check (kind in ('bnpl', 'card_promo')),
+  status text not null default 'active'
+    check (status in ('active', 'paid_off', 'defaulted')),
+  payment_source_account_id uuid references public.accounts(id) on delete set null,
+  liability_account_id uuid references public.accounts(id) on delete set null,
+  -- Category that the PURCHASE belongs to (Electronics, Furniture, etc).
+  -- Distinct from how monthly payment transactions are categorized.
+  purchase_category_id uuid references public.categories(id) on delete set null,
+  notes text,
+  paid_off_at timestamptz,
+  deleted_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists installment_plans_user_idx
+  on public.installment_plans(user_id);
+create index if not exists installment_plans_active_idx
+  on public.installment_plans(user_id, status)
+  where deleted_at is null;
+
+create table if not exists public.installment_payments (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  plan_id uuid not null references public.installment_plans(id) on delete cascade,
+  transaction_id uuid references public.transactions(id) on delete set null,
+  expected_date date not null,
+  expected_amount numeric(14, 2) not null,
+  actual_date date,
+  actual_amount numeric(14, 2),
+  status text not null default 'scheduled'
+    check (status in ('scheduled', 'paid', 'missed', 'partial', 'overpaid')),
+  created_at timestamptz not null default now()
+);
+
+create index if not exists installment_payments_due_idx
+  on public.installment_payments(user_id, expected_date);
+create index if not exists installment_payments_plan_idx
+  on public.installment_payments(plan_id);
+
+alter table public.installment_plans    enable row level security;
+alter table public.installment_payments enable row level security;
+
+drop policy if exists "own installment plans" on public.installment_plans;
+create policy "own installment plans" on public.installment_plans
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop policy if exists "own installment payments" on public.installment_payments;
+create policy "own installment payments" on public.installment_payments
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop trigger if exists touch_installment_plans on public.installment_plans;
+create trigger touch_installment_plans before update on public.installment_plans
+  for each row execute function public.touch_updated_at();
+
+-- =============================================================
+-- spending_with_installments view
+--
+-- "Decision view" of spending. Counts each installment plan as a single
+-- spend at purchase_date, and EXCLUDES individual monthly installment
+-- payment transactions (they'd be double-counted otherwise).
+--
+-- security_invoker = on so RLS on the underlying tables applies — each
+-- user only sees their own rows.
+-- =============================================================
+drop view if exists public.spending_with_installments;
+create view public.spending_with_installments
+  with (security_invoker = on)
+  as
+  select
+    t.id              as id,
+    t.user_id         as user_id,
+    t.date            as date,
+    t.amount          as amount,
+    t.category_id     as category_id,
+    t.merchant_name   as merchant_name,
+    'transaction'::text as source_kind,
+    null::uuid        as plan_id
+  from public.transactions t
+  where t.id not in (
+    select transaction_id from public.installment_payments
+     where transaction_id is not null
+  )
+  union all
+  select
+    p.id              as id,
+    p.user_id         as user_id,
+    p.purchase_date   as date,
+    p.total_amount    as amount,
+    p.purchase_category_id as category_id,
+    p.merchant        as merchant_name,
+    'installment_purchase'::text as source_kind,
+    p.id              as plan_id
+  from public.installment_plans p
+  where p.deleted_at is null;
+
+-- =============================================================
+-- Source-agnostic transaction ingestion
+-- Adds: import_batches table, ingestion columns on transactions,
+-- account-source enum widening (csv + manual), backfill of existing
+-- Plaid rows. Idempotent — safe to re-run.
+-- =============================================================
+
+create table if not exists public.import_batches (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  source text not null
+    check (source in ('csv', 'apple_card', 'plaid', 'manual')),
+  filename text,
+  -- 'pending' (rows parsed, awaiting user mapping/confirmation)
+  -- 'completed' (rows imported)
+  -- 'failed' (parsing or insert error)
+  -- 'cancelled' (user discarded)
+  status text not null default 'pending',
+  rows_parsed int not null default 0,
+  imported_count int not null default 0,
+  duplicate_count int not null default 0,
+  error_count int not null default 0,
+  metadata jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists import_batches_user_idx
+  on public.import_batches(user_id, created_at desc);
+
+alter table public.import_batches enable row level security;
+drop policy if exists "own import batches" on public.import_batches;
+create policy "own import batches" on public.import_batches
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Widen accounts.source to allow generic csv / manual accounts.
+alter table public.accounts
+  drop constraint if exists accounts_source_check;
+alter table public.accounts
+  add constraint accounts_source_check
+  check (source in ('plaid', 'apple_card', 'manual_liability', 'csv', 'manual'));
+
+-- Add ingestion columns on transactions.
+alter table public.transactions
+  add column if not exists source text;
+alter table public.transactions
+  add column if not exists source_account_id text;
+alter table public.transactions
+  add column if not exists external_transaction_id text;
+alter table public.transactions
+  add column if not exists import_batch_id uuid
+    references public.import_batches(id) on delete set null;
+alter table public.transactions
+  add column if not exists dedupe_fingerprint text;
+alter table public.transactions
+  add column if not exists imported_at timestamptz default now();
+alter table public.transactions
+  add column if not exists raw_payload jsonb;
+
+alter table public.transactions
+  drop constraint if exists transactions_source_check;
+alter table public.transactions
+  add constraint transactions_source_check
+  check (
+    source is null
+    or source in ('plaid', 'csv', 'apple_card', 'manual', 'manual_liability')
+  );
+
+create index if not exists transactions_fingerprint_idx
+  on public.transactions(user_id, dedupe_fingerprint);
+create index if not exists transactions_external_id_idx
+  on public.transactions(external_transaction_id);
+create index if not exists transactions_import_batch_idx
+  on public.transactions(import_batch_id);
+
+-- Per-user uniqueness on external_transaction_id catches Plaid + future
+-- source dupes at the DB level. Partial because most rows (manual) have null.
+create unique index if not exists transactions_user_external_unique
+  on public.transactions(user_id, external_transaction_id)
+  where external_transaction_id is not null;
+
+-- Backfill: existing Plaid rows predate these columns. Stamp source/external
+-- and a cross-source fingerprint so later CSV imports into the same account
+-- can dedupe against Plaid rows.
+update public.transactions
+  set source = 'plaid',
+      source_account_id = account_id::text,
+      external_transaction_id = plaid_transaction_id,
+      dedupe_fingerprint = encode(
+        digest(
+          user_id::text || '|' ||
+          account_id::text || '|' ||
+          date::text || '|' ||
+          round(amount * 100)::text || '|' ||
+          regexp_replace(lower(coalesce(merchant_name, raw_name, '')), '[^a-z0-9]', '', 'g'),
+          'sha256'
+        ),
+        'hex'
+      )
+  where source is null
+    and plaid_transaction_id is not null;
+
+-- =============================================================
+-- Categories upgrades, transaction_rules, transaction_splits
+-- Phase 2 of categorization. Idempotent.
+-- =============================================================
+
+alter table public.categories
+  add column if not exists type text not null default 'expense';
+alter table public.categories
+  drop constraint if exists categories_type_check;
+alter table public.categories
+  add constraint categories_type_check
+  check (type in ('income', 'expense', 'transfer'));
+alter table public.categories
+  add column if not exists sort_order int not null default 0;
+-- color and icon already exist
+
+-- Categorization columns on transactions.
+alter table public.transactions
+  add column if not exists category_source text not null default 'none';
+alter table public.transactions
+  add column if not exists ai_category_reason text;
+alter table public.transactions
+  add column if not exists ai_confidence numeric;
+alter table public.transactions
+  add column if not exists ai_suggested_rule jsonb;
+alter table public.transactions
+  drop constraint if exists transactions_category_source_check;
+alter table public.transactions
+  add constraint transactions_category_source_check
+  check (category_source in ('manual', 'rule', 'plaid_default', 'ai', 'none'));
+alter table public.transactions
+  add column if not exists is_split boolean not null default false;
+
+-- Rules table (must exist before applied_rule_id FK).
+create table if not exists public.transaction_rules (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  name text not null,
+  enabled boolean not null default true,
+  priority int not null default 100,
+  merchant_contains text,
+  raw_name_contains text,
+  amount_min numeric(14, 2),
+  amount_max numeric(14, 2),
+  amount_exact numeric(14, 2),
+  account_id uuid references public.accounts(id) on delete cascade,
+  source text
+    check (source is null or source in ('plaid', 'csv', 'apple_card', 'manual', 'manual_liability')),
+  plaid_category text,
+  transaction_type text not null default 'any'
+    check (transaction_type in ('debit', 'credit', 'any')),
+  set_category_id uuid references public.categories(id) on delete set null,
+  set_notes text,
+  mark_as_transfer boolean not null default false,
+  times_applied int not null default 0,
+  last_applied_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, name)
+);
+
+create index if not exists transaction_rules_priority_idx
+  on public.transaction_rules(user_id, enabled, priority);
+
+alter table public.transaction_rules enable row level security;
+drop policy if exists "own transaction rules" on public.transaction_rules;
+create policy "own transaction rules" on public.transaction_rules
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+drop trigger if exists touch_transaction_rules on public.transaction_rules;
+create trigger touch_transaction_rules before update on public.transaction_rules
+  for each row execute function public.touch_updated_at();
+
+alter table public.transactions
+  add column if not exists applied_rule_id uuid
+    references public.transaction_rules(id) on delete set null;
+
+-- Splits table.
+create table if not exists public.transaction_splits (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  transaction_id uuid not null references public.transactions(id) on delete cascade,
+  category_id uuid references public.categories(id) on delete set null,
+  amount numeric(14, 2) not null,
+  notes text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists transaction_splits_tx_idx
+  on public.transaction_splits(transaction_id);
+
+alter table public.transaction_splits enable row level security;
+drop policy if exists "own transaction splits" on public.transaction_splits;
+create policy "own transaction splits" on public.transaction_splits
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+
+-- Update spending view to exclude transfer-categorized transactions.
+-- Transfers show in history but never count toward spending/cash flow.
+drop view if exists public.spending_with_installments;
+create view public.spending_with_installments
+  with (security_invoker = on)
+  as
+  select
+    t.id              as id,
+    t.user_id         as user_id,
+    t.date            as date,
+    t.amount          as amount,
+    t.category_id     as category_id,
+    t.merchant_name   as merchant_name,
+    'transaction'::text as source_kind,
+    null::uuid        as plan_id
+  from public.transactions t
+  left join public.categories c on c.id = t.category_id
+  where t.id not in (
+    select transaction_id from public.installment_payments
+     where transaction_id is not null
+  )
+  and (c.type is null or c.type <> 'transfer')
+  union all
+  select
+    p.id              as id,
+    p.user_id         as user_id,
+    p.purchase_date   as date,
+    p.total_amount    as amount,
+    p.purchase_category_id as category_id,
+    p.merchant        as merchant_name,
+    'installment_purchase'::text as source_kind,
+    p.id              as plan_id
+  from public.installment_plans p
+  where p.deleted_at is null;

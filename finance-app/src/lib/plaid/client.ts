@@ -1,6 +1,7 @@
 import { Configuration, PlaidApi, PlaidEnvironments } from "plaid";
 
 const env = (process.env.PLAID_ENV ?? "sandbox") as keyof typeof PlaidEnvironments;
+const configured = Boolean(process.env.PLAID_CLIENT_ID && process.env.PLAID_SECRET);
 
 const configuration = new Configuration({
   basePath: PlaidEnvironments[env],
@@ -14,6 +15,7 @@ const configuration = new Configuration({
 });
 
 export const plaidClient = new PlaidApi(configuration);
+export const PLAID_CONFIGURED = configured;
 
 export const PLAID_PRODUCTS = (process.env.PLAID_PRODUCTS ?? "transactions")
   .split(",")

@@ -85,8 +85,15 @@ export function normalizeCsvRow(
   const description = mapping.description
     ? (row[mapping.description] ?? "").trim() || null
     : null;
+  const memo = mapping.memo ? (row[mapping.memo] ?? "").trim() || null : null;
+  const reference = mapping.reference
+    ? (row[mapping.reference] ?? "").trim() || null
+    : null;
   const external_transaction_id = mapping.external_id
     ? (row[mapping.external_id] ?? "").trim() || null
+    : reference;
+  const sourceCategory = mapping.category
+    ? (row[mapping.category] ?? "").trim() || null
     : null;
 
   return {
@@ -96,11 +103,12 @@ export function normalizeCsvRow(
       amount,
       currency_code: "USD",
       merchant_name: merchant ?? description,
-      raw_name: description ?? merchant,
+      raw_name: description ?? merchant ?? memo,
       source: ctx.source,
       source_account_id: ctx.source_account_id,
       external_transaction_id,
-      raw_payload: row,
+      raw_payload: { ...row, ...(memo ? { _memo: memo } : {}) },
+      plaid_category: sourceCategory,
     },
   };
 }

@@ -19,8 +19,9 @@ export default async function ImportsPage() {
       <div>
         <h1 className="text-2xl font-medium tracking-tight">Imports</h1>
         <p className="text-sm text-zinc-500 mt-1">
-          Upload CSVs from any bank or card. Apple Card statements are
-          auto-detected; everything else uses a manual column mapping.
+          Upload CSVs from cards and banks. Known formats are detected
+          automatically; unknown files get heuristic or optional Claude-assisted
+          mapping before import.
         </p>
       </div>
 
@@ -51,6 +52,12 @@ export default async function ImportsPage() {
                     {b.rows_parsed} parsed · {b.imported_count} imported ·{" "}
                     {b.duplicate_count} dup ·{" "}
                     {b.error_count} err
+                    {typeof b.metadata?.ai_categorized === "number"
+                      ? ` · ${b.metadata.ai_categorized} AI`
+                      : ""}
+                    {typeof b.metadata?.review_needed === "number"
+                      ? ` · ${b.metadata.review_needed} review`
+                      : ""}
                   </p>
                 </div>
                 <div className="flex items-center gap-3">

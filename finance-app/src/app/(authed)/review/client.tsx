@@ -37,6 +37,24 @@ export default function ReviewClient({
     }
   };
 
+  const acceptAi = async (tx: Transaction) => {
+    if (!tx.category_id) return;
+    await categorize(tx, tx.category_id);
+  };
+
+  const bulkAcceptHighConfidence = async () => {
+    const accepted = items.filter(
+      (tx) =>
+        tx.category_source === "ai" &&
+        tx.category_id &&
+        (tx.ai_confidence ?? 0) >= 0.85,
+    );
+    for (const tx of accepted) {
+      // eslint-disable-next-line no-await-in-loop
+      await categorize(tx, tx.category_id as string);
+    }
+  };
+
   const markTransfer = async (tx: Transaction) => {
     setBusy(tx.id);
     const res = await fetch(`/api/transactions/${tx.id}/categorize`, {
@@ -52,6 +70,21 @@ export default function ReviewClient({
   };
 
   return (
+    <div className="space-y-3">
+      {items.some(
+        (tx) =>
+          tx.category_source === "ai" &&
+          tx.category_id &&
+          (tx.ai_confidence ?? 0) >= 0.85,
+      ) && (
+        <button
+          type="button"
+          onClick={bulkAcceptHighConfidence}
+          className="rounded-md border border-zinc-300 dark:border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-50 dark:hover:bg-zinc-900"
+        >
+          Accept high-confidence AI suggestions
+        </button>
+      )}
     <ul className="divide-y divide-zinc-200 dark:divide-zinc-800 border border-zinc-200 dark:border-zinc-800 rounded-md">
       {items.map((tx) => (
         <li key={tx.id} className="px-4 py-3 text-sm space-y-2">
@@ -62,6 +95,14 @@ export default function ReviewClient({
                 {tx.category_source === "plaid_default" && (
                   <span className="ml-2 text-xs text-zinc-500">
                     plaid suggestion
+                  </span>
+                )}
+                {tx.category_source === "ai" && (
+                  <span className="ml-2 text-xs text-sky-600">
+                    AI suggestion
+                    {tx.ai_confidence != null
+                      ? ` ${Math.round(tx.ai_confidence * 100)}%`
+                      : ""}
                   </span>
                 )}
               </p>
@@ -78,7 +119,34 @@ export default function ReviewClient({
               {fmtUsd(tx.amount)}
             </p>
           </div>
+          {tx.category_source === "ai" && (
+            <div className="rounded-md bg-sky-50 dark:bg-sky-950/30 px-3 py-2 text-xs text-sky-900 dark:text-sky-100">
+              <p>
+                Suggested:{" "}
+                <strong>
+                  {categories.find((c) => c.id === tx.category_id)?.name ??
+                    tx.ai_category ??
+                    "Unknown"}
+                </strong>
+              </p>
+              {tx.ai_category_reason && (
+                <p className="mt-1 text-sky-800 dark:text-sky-200">
+                  {tx.ai_category_reason}
+                </p>
+              )}
+            </div>
+          )}
           <div className="flex flex-wrap items-center gap-3">
+            {tx.category_source === "ai" && tx.category_id && (
+              <button
+                type="button"
+                onClick={() => acceptAi(tx)}
+                disabled={busy === tx.id}
+                className="rounded-md bg-zinc-900 text-zinc-50 dark:bg-zinc-100 dark:text-zinc-900 px-3 py-1 text-xs disabled:opacity-50"
+              >
+                Accept
+              </button>
+            )}
             <select
               className="rounded-md border border-zinc-300 dark:border-zinc-700 bg-transparent px-2 py-1 text-xs"
               defaultValue=""
@@ -119,9 +187,27 @@ export default function ReviewClient({
             >
               Create rule
             </Link>
+            {tx.category_source === "ai" && tx.category_id && (
+              <Link
+                href={`/rules/new?merchant=${encodeURIComponent(ruleMerchant(tx))}&category_id=${encodeURIComponent(tx.category_id)}`}
+                className="text-xs underline text-zinc-500"
+              >
+                Make rule from AI
+              </Link>
+            )}
           </div>
         </li>
       ))}
     </ul>
+    </div>
   );
+}
+
+function ruleMerchant(tx: Transaction) {
+  const suggested = tx.ai_suggested_rule;
+  const merchant =
+    suggested && typeof suggested.merchant_contains === "string"
+      ? suggested.merchant_contains
+      : null;
+  return merchant ?? tx.merchant_name ?? tx.raw_name ?? "";
 }

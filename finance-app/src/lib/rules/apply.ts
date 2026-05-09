@@ -54,6 +54,7 @@ type Evaluable = Pick<
 export async function applyRulesToTransaction(
   admin: SupabaseClient,
   txn: Evaluable,
+  opts: { rule_id?: string } = {},
 ): Promise<ApplyResult> {
   if (txn.category_source === "manual") {
     return { matched: false, source: "manual", reason: "manual_lock" };
@@ -69,6 +70,7 @@ export async function applyRulesToTransaction(
   if (ruleErr) throw ruleErr;
 
   for (const rule of rules ?? []) {
+    if (opts.rule_id && rule.id !== opts.rule_id) continue;
     if (!ruleMatches(rule, txn)) continue;
 
     let categoryId: string | null = rule.set_category_id;

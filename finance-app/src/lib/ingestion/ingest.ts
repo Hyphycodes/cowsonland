@@ -96,6 +96,7 @@ export async function ingestTransactions(
     summary.imported = imported;
     summary.inserted_ids = ids;
     summary.errors = errors;
+    await runRulesOnInserted(client, summary.inserted_ids, summary);
     return summary;
   }
 

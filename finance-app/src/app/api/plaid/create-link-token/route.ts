@@ -5,6 +5,7 @@ import {
   PLAID_PRODUCTS,
   PLAID_COUNTRY_CODES,
   PLAID_DAYS_REQUESTED,
+  PLAID_CONFIGURED,
 } from "@/lib/plaid/client";
 import { createClient } from "@/lib/supabase/server";
 
@@ -14,6 +15,9 @@ export async function POST() {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+  if (!PLAID_CONFIGURED) {
+    return NextResponse.json({ error: "plaid_not_configured" }, { status: 503 });
+  }
 
   try {
     const { data } = await plaidClient.linkTokenCreate({

@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import type { Account, ImportBatch } from "@/types/db";
+import type { CsvDetection, CsvMapping } from "@/lib/ingestion/types";
 import FinalizeFlow from "./finalize";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +10,8 @@ type Md = {
   headers?: string[];
   staging_rows?: Record<string, string>[];
   suggested_preset?: string | null;
+  suggested_mapping?: CsvMapping | null;
+  detection?: CsvDetection | null;
 };
 
 export default async function ImportDetailPage({
@@ -49,10 +52,28 @@ export default async function ImportDetailPage({
           <li>
             <strong>{batch.duplicate_count}</strong> duplicates skipped
           </li>
+        <li>
+          <strong>{batch.error_count}</strong> errors
+        </li>
+        {typeof batch.metadata?.rules_matched === "number" && (
           <li>
-            <strong>{batch.error_count}</strong> errors
+            <strong>{batch.metadata.rules_matched}</strong> rules matched
           </li>
-        </ul>
+        )}
+        {typeof batch.metadata?.ai_categorized === "number" && (
+          <li>
+            <strong>{batch.metadata.ai_categorized}</strong> AI categorized
+          </li>
+        )}
+        {typeof batch.metadata?.review_needed === "number" && (
+          <li>
+            <strong>{batch.metadata.review_needed}</strong>{" "}
+            <a className="underline" href="/review">
+              needing review
+            </a>
+          </li>
+        )}
+      </ul>
       </div>
     );
   }
@@ -65,6 +86,8 @@ export default async function ImportDetailPage({
       headers={md.headers ?? []}
       sampleRows={sampleRows}
       suggestedPreset={md.suggested_preset ?? null}
+      suggestedMapping={md.suggested_mapping ?? null}
+      detection={md.detection ?? null}
       rowCount={md.staging_rows?.length ?? 0}
       accounts={accounts ?? []}
     />

@@ -46,7 +46,7 @@ export async function reapplyRules(
       .order("date", { ascending: false })
       .range(from, from + BATCH_SIZE - 1);
     if (args.only_uncategorized) {
-      q = q.in("category_source", ["none", "plaid_default"]);
+      q = q.in("category_source", ["none", "plaid_default", "ai"]);
     }
     const { data, error } = await q.returns<
       Pick<
@@ -74,7 +74,9 @@ export async function reapplyRules(
         continue;
       }
       try {
-        const r = await applyRulesToTransaction(admin, tx);
+        const r = await applyRulesToTransaction(admin, tx, {
+          rule_id: args.rule_id,
+        });
         if (r.matched && r.source === "rule") {
           if (!args.rule_id || ("rule_id" in r && r.rule_id === args.rule_id)) {
             result.matched += 1;

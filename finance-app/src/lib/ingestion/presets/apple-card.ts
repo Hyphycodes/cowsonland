@@ -1,4 +1,4 @@
-import type { CsvMapping } from "../types";
+import type { CsvMapping, CsvPreset } from "../types";
 
 /**
  * Apple Card monthly statement CSV. Columns Apple ships:
@@ -11,6 +11,7 @@ import type { CsvMapping } from "../types";
 export const APPLE_CARD_PRESET = {
   id: "apple_card" as const,
   name: "Apple Card statement",
+  institution: "Apple Card",
   source: "apple_card" as const,
   signature: [
     "Transaction Date",
@@ -26,7 +27,7 @@ export const APPLE_CARD_PRESET = {
     description: "Description",
     date_format: "auto",
   } satisfies CsvMapping,
-};
+} satisfies CsvPreset;
 
 /**
  * Returns true if the CSV's headers look like an Apple Card export.

@@ -233,6 +233,27 @@ describe("applyRulesToTransaction", () => {
     if (r.matched) expect(r.category_id).toBe("catA");
   });
 
+  it("can apply only one requested rule id", async () => {
+    const ruleA: TransactionRule = {
+      ...baseRule,
+      id: "rA",
+      priority: 50,
+      merchant_contains: "whole",
+      set_category_id: "catA",
+    };
+    const ruleB: TransactionRule = {
+      ...baseRule,
+      id: "rB",
+      priority: 100,
+      merchant_contains: "foods",
+      set_category_id: "catB",
+    };
+    const { client } = makeAdmin({ rules: [ruleA, ruleB] });
+    const r = await applyRulesToTransaction(client, baseTx, { rule_id: "rB" });
+    expect(r.matched).toBe(true);
+    if (r.matched) expect(r.category_id).toBe("catB");
+  });
+
   it("never overwrites manual categorization", async () => {
     const rule = { ...baseRule, merchant_contains: "whole foods" };
     const { client, writes } = makeAdmin({ rules: [rule] });

@@ -9,9 +9,9 @@ import { createHash } from "node:crypto";
  * spoof a unique row:
  *   - merchant lowercased + stripped to alphanumerics
  *   - amount converted to integer cents (avoids float drift)
- *   - account_id is the source's account token, NOT our accounts.id —
- *     a CSV row from "chase 1234" should not collide with a Plaid row
- *     from a different account that happens to match amount/date.
+ *   - account key should be our internal accounts.id when available.
+ *     This lets a CSV import into a Plaid-linked account dedupe against
+ *     the Plaid copy of the same transaction.
  *
  * Kept deterministic and tolerance-free for v1. Future improvements
  * (Levenshtein on merchant, ±1 day window) plug in here.
@@ -31,7 +31,6 @@ export function fingerprint(parts: {
   const account = parts.source_account_id ?? "";
   const payload = [
     parts.user_id,
-    parts.source,
     account,
     parts.date,
     String(cents),
